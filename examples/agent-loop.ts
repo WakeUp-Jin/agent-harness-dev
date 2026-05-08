@@ -3,22 +3,28 @@
  * 实现 LLM → tool_calls → ToolScheduler → 回填 → 重复 的主循环，
  * 包含子智能体执行能力（AgentTool 模式）。
  *
- * 使用 ContextItem 内部数据结构管理上下文，仅在调用 LLM 时转换为消息格式。
+ * 使用 Message 判别联合管理上下文，LLM 直接返回 AssistantMessage。
  */
 
-import { BaseLLMService, LLMResponse, Message, TokenUsage, ToolCall } from './llm-service';
+import {
+  BaseLLMService, Message, Usage,
+  AssistantMessage, ToolResultMessage,
+  MessagePriority,
+  getTextContent, getToolCalls, hasToolCalls,
+} from './llm-service';
 import { ToolScheduler } from './tool-scheduler';
-import { ToolRegistry, ToolDefinition } from './tool-definition';
-import { ContextManager, ContextItem, MessagePriority } from './context-manager';
+import { ToolRegistry } from './tool-definition';
+import { ContextManager } from './context-manager';
 
 const MAX_ITERATIONS = 10;
 
 // ─── 结果类型 ───
 
 interface EngineResult {
-  text: string;
-  usage: TokenUsage;
-  thinking?: string;
+  /** 最终的 assistant 回复（最后一轮无工具调用的回复） */
+  message: AssistantMessage;
+  /** 所有轮次累计的 Token 使用量 */
+  totalUsage: Usage;
 }
 
 interface AgentToolResult {
@@ -52,86 +58,65 @@ export class ExecutionEngine {
 
   /**
    * 执行 LLM-Tool 循环。
-   * 每轮：LLM.complete() → 解析 tool_calls → 调度执行 → 回填结果 → 重复
-   * 终止条件：LLM 返回纯文本（无 tool_calls）或达到最大迭代次数
+   * 每轮：LLM.completeSimple() → 检查 stopReason → 调度工具 → 回填结果 → 重复
+   * 终止条件：stopReason 不是 "toolUse"，或达到最大迭代次数
    */
   async run(
     llm: BaseLLMService,
     contextManager: ContextManager,
     toolRegistry: ToolRegistry,
     options?: {
-      onMessage?: (item: ContextItem) => void;
+      onMessage?: (message: Message) => void;
       source?: string;
     }
   ): Promise<EngineResult> {
-    const totalUsage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
-    let lastText = '';
-    let lastThinking: string | undefined;
+    const totalUsage = createEmptyUsage();
+    let lastMessage!: AssistantMessage;
 
     for (let i = 0; i < this.maxIterations; i++) {
-      const messages = contextManager.getContext();
-      const tools = toolRegistry.getDefinitions();
+      const context = contextManager.getContext();
+      context.tools = toolRegistry.getAll().map(t => ({
+        name: t.name,
+        description: t.description,
+        parameters: t.parameters,
+      }));
 
-      const response = await llm.complete(messages, tools);
-      this.accumulateUsage(totalUsage, response.usage);
-      lastThinking = response.thinking;
+      const assistantMsg = await llm.completeSimple(context);
+      assistantMsg.source = options?.source ?? 'llm';
+      assistantMsg.priority = MessagePriority.HIGH;
+      lastMessage = assistantMsg;
 
-      if (response.toolCalls.length === 0) {
-        lastText = response.text;
-        const item = new ContextItem({
-          role: 'assistant',
-          content: response.text,
-          source: options?.source ?? 'llm',
-          priority: MessagePriority.HIGH,
-          thinking: response.thinking,
-        });
-        contextManager.appendItem(item);
-        options?.onMessage?.(item);
+      accumulateUsage(totalUsage, assistantMsg.usage);
+      contextManager.appendMessage(assistantMsg);
+      options?.onMessage?.(assistantMsg);
+
+      if (assistantMsg.stopReason !== 'toolUse') {
         break;
       }
 
-      const assistantItem = new ContextItem({
-        role: 'assistant',
-        content: response.text || '',
-        source: options?.source ?? 'llm',
-        priority: MessagePriority.HIGH,
-        toolCalls: response.toolCalls.map(tc => ({
-          id: tc.id,
-          type: 'function',
-          function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
-        })),
-        thinking: response.thinking,
-      });
-      contextManager.appendItem(assistantItem);
-      options?.onMessage?.(assistantItem);
-
-      for (const toolCall of response.toolCalls) {
+      const toolCalls = getToolCalls(assistantMsg);
+      for (const toolCall of toolCalls) {
         const result = await this.scheduler.execute(
           toolCall.id,
           toolCall.name,
-          toolCall.arguments
+          toolCall.arguments,
         );
 
-        const toolItem = new ContextItem({
-          role: 'tool',
-          content: result.resultString || result.error || '',
-          source: `tool:${toolCall.name}`,
-          priority: MessagePriority.NORMAL,
+        const toolMsg: ToolResultMessage = {
+          role: 'toolResult',
           toolCallId: toolCall.id,
-          name: toolCall.name,
-        });
-        contextManager.appendItem(toolItem);
-        options?.onMessage?.(toolItem);
+          toolName: toolCall.name,
+          content: [{ type: 'text', text: result.resultString || result.error || '' }],
+          isError: !!result.error,
+          timestamp: Date.now(),
+          source: `tool:${toolCall.name}`,
+        };
+        contextManager.appendMessage(toolMsg);
+        options?.onMessage?.(toolMsg);
       }
     }
 
-    return { text: lastText, usage: totalUsage, thinking: lastThinking };
-  }
-
-  private accumulateUsage(total: TokenUsage, usage: TokenUsage) {
-    total.promptTokens += usage.promptTokens;
-    total.completionTokens += usage.completionTokens;
-    total.totalTokens += usage.totalTokens;
+    return { message: lastMessage, totalUsage };
   }
 }
 
@@ -170,22 +155,23 @@ export class Agent {
   }
 
   async run(userText: string): Promise<string> {
-    const userItem = new ContextItem({
+    const userMsg: Message = {
       role: 'user',
       content: userText,
+      timestamp: Date.now(),
       source: 'user',
       priority: MessagePriority.HIGH,
-    });
-    this.contextManager.appendItem(userItem);
+    };
+    this.contextManager.appendMessage(userMsg);
 
     const result = await this.engine.run(
       this.llm,
       this.contextManager,
       this.toolRegistry,
-      { source: 'main' }
+      { source: 'main' },
     );
 
-    return result.text;
+    return getTextContent(result.message);
   }
 
   // ─── AgentTool：子智能体工具注册 ───
@@ -222,30 +208,27 @@ export class Agent {
   private async spawnSubAgent(
     agentType: string,
     prompt: string,
-    description: string
+    description: string,
   ): Promise<AgentToolResult> {
     const startTime = Date.now();
     const agentId = `a${Math.random().toString(36).slice(2, 10)}`;
 
     const def = this.subAgentDefs.get(agentType);
 
-    // 1. 独立的 ContextManager，使用子智能体专属系统提示词
     const subContext = new ContextManager({
       systemPrompt: def?.systemPrompt ?? 'You are a helpful assistant.',
     });
 
-    // 2. 独立的工具集（主智能体工具的子集）
     const subToolRegistry = this.buildSubAgentToolRegistry(def?.allowedTools);
 
-    // 3. 注入 prompt 作为子智能体的首条 user 消息
-    subContext.appendItem(new ContextItem({
+    subContext.appendMessage({
       role: 'user',
       content: prompt,
+      timestamp: Date.now(),
       source: 'parent-agent',
       priority: MessagePriority.HIGH,
-    }));
+    });
 
-    // 4. 独立的执行引擎
     const subEngine = new ExecutionEngine({
       scheduler: this.scheduler,
       maxIterations: def?.maxIterations ?? MAX_ITERATIONS,
@@ -258,31 +241,54 @@ export class Agent {
       subToolRegistry,
       {
         source: `subagent:${agentType}`,
-        onMessage: (item) => {
-          if (item.role === 'assistant' && item.toolCalls.length > 0) {
-            toolUseCount += item.toolCalls.length;
+        onMessage: (msg) => {
+          if (msg.role === 'assistant' && hasToolCalls(msg)) {
+            toolUseCount += getToolCalls(msg).length;
           }
         },
-      }
+      },
     );
 
     return {
       agentId,
       agentType,
-      text: result.text,
+      text: getTextContent(result.message),
       totalToolUseCount: toolUseCount,
       totalDurationMs: Date.now() - startTime,
-      totalTokens: result.usage.totalTokens,
+      totalTokens: result.totalUsage.totalTokens,
     };
   }
 
   private buildSubAgentToolRegistry(allowedTools?: string[]): ToolRegistry {
-    const allDefs = this.toolRegistry.getDefinitions();
     if (!allowedTools) {
       return this.toolRegistry;
     }
     const allowed = new Set(allowedTools);
-    const filtered = allDefs.filter(d => allowed.has(d.name));
+    const filtered = this.toolRegistry.getAll().filter(d => allowed.has(d.name));
     return ToolRegistry.from(filtered);
   }
+}
+
+// ─── Usage 工具函数 ───
+
+function createEmptyUsage(): Usage {
+  return {
+    input: 0, output: 0,
+    cacheRead: 0, cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+}
+
+function accumulateUsage(total: Usage, delta: Usage): void {
+  total.input += delta.input;
+  total.output += delta.output;
+  total.cacheRead += delta.cacheRead;
+  total.cacheWrite += delta.cacheWrite;
+  total.totalTokens += delta.totalTokens;
+  total.cost.input += delta.cost.input;
+  total.cost.output += delta.cost.output;
+  total.cost.cacheRead += delta.cost.cacheRead;
+  total.cost.cacheWrite += delta.cost.cacheWrite;
+  total.cost.total += delta.cost.total;
 }

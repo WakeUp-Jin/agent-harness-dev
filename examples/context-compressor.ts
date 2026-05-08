@@ -3,10 +3,15 @@
  * 两层压缩机制：工具输出裁剪（前置）+ 历史记录压缩（兜底）。
  */
 
+import { Message, getMessageText } from './llm-service';
+
 interface CompressorConfig {
-  maxToolOutputChars: number;     // 工具输出最大字符数（建议 2000）
-  absoluteMaxChars: number;       // 工具输出绝对上限（如 100000）
-  summaryMaxTokens: number;       // 摘要输出最大 token
+  /** 工具输出最大字符数（建议 2000） */
+  maxToolOutputChars: number;
+  /** 工具输出绝对上限（如 100000） */
+  absoluteMaxChars: number;
+  /** 摘要输出最大 token */
+  summaryMaxTokens: number;
 }
 
 type SummarizeFn = (text: string, instruction?: string) => Promise<string>;
@@ -27,17 +32,14 @@ export class OutputTruncator {
 
   /** 第一层：绝对上限截断（防止单个工具输出撑爆摘要模型） */
   async truncate(output: string): Promise<string> {
-    // 绝对上限截断
     if (output.length > this.config.absoluteMaxChars) {
       output = output.slice(0, this.config.absoluteMaxChars) + '\n[...truncated]';
     }
 
-    // 未超过软限制，直接返回
     if (output.length <= this.config.maxToolOutputChars) {
       return output;
     }
 
-    // 第二层：超过软限制，生成摘要
     const summary = await this.summarize(
       output,
       '保留关键信息：文件路径、错误信息、核心数据。输出不超过300字。'
@@ -60,24 +62,37 @@ export class HistoryCompressor {
    * 前面的部分优先裁剪工具消息，剩余生成摘要。
    */
   async compress(
-    messages: Array<{ role: string; content: string }>,
-    preserveRatio = 0.3
-  ): Promise<Array<{ role: string; content: string }>> {
+    messages: Message[],
+    preserveRatio = 0.3,
+  ): Promise<Message[]> {
     const preserveCount = Math.max(1, Math.floor(messages.length * preserveRatio));
     const toCompress = messages.slice(0, -preserveCount);
     const preserved = messages.slice(-preserveCount);
 
-    // 优先移除工具类消息（Token 占比最高）
-    const withoutTools = toCompress.filter(m => m.role !== 'tool');
-    const textToSummarize = withoutTools.map(m => `[${m.role}] ${m.content}`).join('\n---\n');
+    const withoutTools = toCompress.filter(m => m.role !== 'toolResult');
+    const textToSummarize = withoutTools
+      .map(m => `[${m.role}] ${getMessageText(m)}`)
+      .join('\n---\n');
 
     const summary = await this.summarize(
       textToSummarize,
-      '生成对话摘要。保留：关键决策、文件路径、未完成任务、重要错误。不超过500字。'
+      '生成对话摘要。保留：关键决策、文件路径、未完成任务、重要错误。不超过500字。',
     );
 
     return [
-      { role: 'assistant', content: `[历史摘要]\n${summary}` },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: `[历史摘要]\n${summary}` }],
+        model: 'summarizer',
+        provider: 'internal',
+        usage: {
+          input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: 'stop',
+        timestamp: Date.now(),
+        source: 'summary',
+      },
       ...preserved,
     ];
   }

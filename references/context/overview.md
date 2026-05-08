@@ -23,7 +23,7 @@
 
 | 文件 | 关注点 |
 |------|--------|
-| `mgmt-context-architecture.md` | 上下文系统架构：内部数据结构（ContextItem/ContextParts/SystemPart）、转换管线、模块编排流程 |
+| `mgmt-context-architecture.md` | 上下文系统架构：类型层次（Context/Message/Content 判别联合）、SystemPart、模块编排流程 |
 | `mgmt-strategies.md` | 上下文失控的四种模式及管理策略（RAG 筛选/隔离/修剪/总结） |
 | `mgmt-compression.md` | 压缩调度（何时压缩、压缩什么）与压缩指令（ClaudeCode 8 节算法/Gemini 5 点 scratchpad/工具消息裁剪） |
 | `mgmt-token-strategies.md` | Token 压缩的具体执行策略：三种移除策略（中间/最旧/混合）、消息优先级系统、策略选择机制 |

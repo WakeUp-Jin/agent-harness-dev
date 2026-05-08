@@ -12,20 +12,23 @@ LLM 模块通过工厂模式 + 统一接口解决多模型接入问题。核心�
 
 ### 第二层：服务基类（BaseLLMService）
 
-定义统一的接口契约，所有具体服务类都实现这些方法：
+采用 stream-first 设计，子类只需实现一个抽象方法 `_doStream`，基类提供四个公开方法：
 
-- `complete(messages, tools)`：核心方法——接收上下文消息和工具定义，返回 LLM 响应。这是执行引擎调用的主入口
-- `chat(message)`：简单对话方法，不涉及工具调用。适用于内部辅助任务（摘要、分类等）
-- `generate(prompt)`：直接生成，绕过对话上下文。适用于独立的文本生成任务
+- `stream(context)`：流式调用——内部调用 `convertMessages()` 将 Context 中的 Message[] 转为 OpenAI 兼容的 APIMessage[]，再交给子类 `_doStream` 执行
+- `complete(context)`：非流式调用——等待 stream 完成，直接返回 AssistantMessage
+- `streamSimple(context, options?)`：流式调用（通用选项）——接受 provider 无关的 SimpleStreamOptions（如 `reasoning: "high"`），映射为 StreamOptions
+- `completeSimple(context, options?)`：非流式调用（通用选项）——执行引擎调用的主入口
+
+基类还提供 `convertMessages(context)` 方法，默认将内部 Message[] 转为 OpenAI 兼容格式（`systemPrompt → system role`，`toolResult → tool role`，`AssistantMessage.content 中的 ToolCallContent → tool_calls 数组`），子类可重写以适配 Anthropic 等非兼容 provider。
 
 ### 第三层：具体服务类
 
-每个 LLM 提供商一个实现类（OpenAIService、ClaudeService、DeepSeekService 等）。每个服务类处理该提供商特有的：
+每个 LLM 提供商一个实现类（OpenAIService、ClaudeService、DeepSeekService 等）。子类只需实现 `_doStream(messages, tools?, options?)`，接收已转换的 APIMessage[]。每个服务类处理该提供商特有的：
 - SDK 客户端初始化
-- 消息格式转换（内部格式 → 提供商 API 格式）
-- 工具定义格式转换（统一 schema → 提供商专属格式）
-- 响应解析（提供商返回格式 → 内部统一的 LLMResponse）
-- 错误处理和重试策略
+- 流式 SSE 解析，组装 AssistantMessageEvent 事件流
+- 工具定义格式微调（如 Anthropic 的工具格式与 OpenAI 不同）
+- 可选重写 `convertMessages()` 以适配非 OpenAI 兼容的消息格式
+- 可选重写 `resolveSimpleOptions()` 以支持 reasoning 等 provider 特定参数
 
 ## Registry 模式
 
@@ -35,15 +38,17 @@ LLM 模块通过工厂模式 + 统一接口解决多模型接入问题。核心�
 - 工厂函数通过 Registry 查找对应的服务类
 - 新增供应商只需实现服务类并注册，无需修改工厂函数
 
-## 统一响应格式（LLMResponse）
+## 响应格式
 
-所有服务类返回统一的 LLMResponse 结构：
-- `text`：纯文本响应内容
-- `tool_calls`：工具调用列表（name + arguments）
-- `usage`：Token 使用统计（prompt_tokens + completion_tokens）
-- `thinking`：推理过程文本（如有）
+`complete()` / `completeSimple()` 直接返回 `AssistantMessage`（不再包装为 LLMResponse），包含：
+- `content`：结构化内容数组（TextContent / ThinkingContent / ToolCallContent）
+- `usage`：Token 使用量与成本
+- `stopReason`：停止原因（stop / toolUse / length / error / aborted）
+- `model` / `provider`：生成来源
 
-执行引擎通过检查 `tool_calls` 是否为空来判断 LLM 是"最终回复"还是"请求工具调用"。
+`stream()` / `streamSimple()` 返回 `AssistantMessageEventStream`，产出 `text_delta` / `thinking_delta` / `tool_call_delta` / `done` / `error` 事件。调用 `.result()` 可等待流完成并返回最终的 AssistantMessage。
+
+执行引擎通过检查 `stopReason === 'toolUse'` 来判断 LLM 是"最终回复"还是"请求工具调用"。
 
 ## 关键设计决策
 
@@ -57,7 +62,7 @@ LLM 模块通过工厂模式 + 统一接口解决多模型接入问题。核心�
 
 **消息格式转换的必要性**
 
-不同供应商的 API 格式差异很大——OpenAI 的 tool_calls 是数组嵌套，Anthropic 的是 content blocks。系统内部使用统一的消息格式，在服务类中做 input/output 双向转换。
+系统内部使用结构化的 Message 类型（带 source/priority/timestamp 等元数据），而 API 只接受简单的 role + content 格式。`BaseLLMService.convertMessages()` 在基类中提供默认的 OpenAI 兼容转换（丢弃元数据、`toolResult` → `tool` role、ToolCallContent → `tool_calls` 数组）。不同供应商的 API 格式差异（如 Anthropic 的 content blocks）通过子类重写 `convertMessages()` 处理。
 
 ## 辅助能力
 

@@ -7,10 +7,13 @@
  * - SleepTool：让模型自主决定休眠时机和时长
  */
 
-import { BaseLLMService, Message, TokenUsage } from './llm-service';
+import {
+  BaseLLMService, Context, Message,
+  UserMessage, AssistantMessage,
+  getTextContent,
+} from './llm-service';
 import { ToolScheduler } from './tool-scheduler';
 import { ToolRegistry } from './tool-definition';
-import { ContextItem, MessagePriority } from './context-manager';
 import { ExecutionEngine } from './agent-loop';
 
 // ─── 消息类型 ───
@@ -53,12 +56,10 @@ class MessageQueue {
           : a.createdAt - b.createdAt
       );
 
-      // 唤醒正在等待的 dequeue
       if (this.waitResolve) {
         this.waitResolve();
         this.waitResolve = null;
       }
-      // 触发 wake 信号（中断 sleep）
       if (this.wakeResolve) {
         this.wakeResolve();
         this.wakeResolve = null;
@@ -174,14 +175,10 @@ class KairosRunner {
    * KairosRunner 有独立的上下文：KAIROS 系统提示词 + 最近 N 轮 tick 历史。
    */
   async handleTick(msg: QueueMessage): Promise<string> {
-    const messages = this.buildContext(msg.content);
+    const context = this.buildContext(msg.content);
 
-    const response = await this.llm.complete(
-      messages,
-      this.toolRegistry.getDefinitions()
-    );
-
-    const replyText = response.text;
+    const assistantMsg = await this.llm.completeSimple(context);
+    const replyText = getTextContent(assistantMsg);
 
     this.updateHistory(msg.content, replyText);
 
@@ -193,26 +190,54 @@ class KairosRunner {
    * 如果 LLM 没有调用 Sleep，返回默认值。
    */
   getSleepSeconds(resultText: string): number {
-    // 在实际实现中，会遍历最近的 assistant 消息中的 tool_calls，
-    // 查找 name === 'Sleep' 的调用并提取 arguments.seconds
-    // 这里简化为返回默认值
     return this.config.defaultSleepSeconds;
   }
 
-  private buildContext(tickContent: string): Message[] {
-    const messages: Message[] = [
-      { role: 'system', content: KAIROS_SYSTEM_PROMPT },
-      ...this.recentHistory.slice(-MAX_HISTORY_MESSAGES),
-      { role: 'user', content: tickContent },
-    ];
-    return messages;
+  private buildContext(tickContent: string): Context {
+    const userMsg: UserMessage = {
+      role: 'user',
+      content: tickContent,
+      timestamp: Date.now(),
+    };
+
+    return {
+      systemPrompt: KAIROS_SYSTEM_PROMPT,
+      messages: [
+        ...this.recentHistory.slice(-MAX_HISTORY_MESSAGES),
+        userMsg,
+      ],
+      tools: this.toolRegistry.getAll().map(t => ({
+        name: t.name,
+        description: t.description,
+        parameters: t.parameters,
+      })),
+    };
   }
 
   private updateHistory(tickContent: string, reply: string) {
-    this.recentHistory.push({ role: 'user', content: tickContent });
+    const userMsg: UserMessage = {
+      role: 'user',
+      content: tickContent,
+      timestamp: Date.now(),
+    };
+    this.recentHistory.push(userMsg);
+
     if (reply.trim()) {
-      this.recentHistory.push({ role: 'assistant', content: reply });
+      const assistantMsg: AssistantMessage = {
+        role: 'assistant',
+        content: [{ type: 'text', text: reply }],
+        model: this.llm['config'].model,
+        provider: this.llm['config'].provider,
+        usage: {
+          input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: 'stop',
+        timestamp: Date.now(),
+      };
+      this.recentHistory.push(assistantMsg);
     }
+
     if (this.recentHistory.length > MAX_HISTORY_MESSAGES) {
       this.recentHistory = this.recentHistory.slice(-MAX_HISTORY_MESSAGES);
     }
@@ -223,7 +248,7 @@ class KairosRunner {
       const { seconds } = args as { seconds: number };
       const clamped = Math.max(
         this.config.minSleepSeconds,
-        Math.min(seconds, this.config.maxSleepSeconds)
+        Math.min(seconds, this.config.maxSleepSeconds),
       );
       return { resultString: `Sleeping for ${clamped} seconds` };
     });
@@ -328,11 +353,10 @@ class QueueProcessor {
   private async tailDispatch(
     msg: QueueMessage,
     resultText: string,
-    tickFailed: boolean
+    tickFailed: boolean,
   ): Promise<void> {
     if (!this.kairosEnabled) return;
 
-    // user/cron 完成后：队列空 → 立即注入 tick
     if (msg.mode === 'user' || msg.mode === 'cron') {
       if (!this.queue.hasPending()) {
         await this.injectTick();
@@ -340,7 +364,6 @@ class QueueProcessor {
       return;
     }
 
-    // tick 完成后：可中断 sleep → 队列仍空 → 注入 tick
     if (msg.mode === 'tick') {
       const sleepSeconds = tickFailed
         ? this.kairosConfig!.defaultSleepSeconds
@@ -355,9 +378,6 @@ class QueueProcessor {
     }
   }
 
-  /**
-   * 构造一条 tick 消息并入队。
-   */
   private async injectTick(): Promise<void> {
     const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
     const msg: QueueMessage = {
@@ -367,7 +387,6 @@ class QueueProcessor {
       content: `<tick>${now}</tick>`,
       createdAt: Date.now(),
     };
-    // 直接入队，不 await 结果（tick 的结果由 KairosRunner 处理）
     this.queue.enqueue(msg).catch(() => {});
   }
 
@@ -378,7 +397,7 @@ class QueueProcessor {
   private async interruptibleSleep(seconds: number): Promise<boolean> {
     const clamped = Math.max(
       this.kairosConfig!.minSleepSeconds,
-      Math.min(seconds, this.kairosConfig!.maxSleepSeconds)
+      Math.min(seconds, this.kairosConfig!.maxSleepSeconds),
     );
 
     const timeoutPromise = sleep(clamped * 1000).then(() => false);
@@ -393,46 +412,3 @@ class QueueProcessor {
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
-
-// ─── 使用示例 ───
-
-/*
-const queue = new MessageQueue();
-const agent: AgentRunner = { run: async (text) => `处理: ${text}` };
-const kairosConfig = DEFAULT_KAIROS_CONFIG;
-
-const kairosRunner = new KairosRunner({
-  llm,
-  toolRegistry,
-  scheduler,
-  config: kairosConfig,
-});
-
-const processor = new QueueProcessor({
-  queue,
-  agent,
-  kairos: kairosRunner,
-  kairosConfig,
-});
-
-// 启动处理器
-processor.run();
-
-// 用户消息入队
-queue.enqueue({
-  id: 'msg-1',
-  priority: QueuePriority.USER,
-  mode: 'user',
-  content: '帮我检查一下最新的 PR',
-  createdAt: Date.now(),
-});
-
-// 定时任务入队
-queue.enqueue({
-  id: 'cron-1',
-  priority: QueuePriority.CRON,
-  mode: 'cron',
-  content: '检查构建状态并汇报',
-  createdAt: Date.now(),
-});
-*/

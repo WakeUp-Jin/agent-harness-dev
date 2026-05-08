@@ -3,13 +3,13 @@
  * 通过"假工具"的 function calling 模式约束 LLM 输出格式。
  */
 
-import { ToolDefinition, LLMResponse, Message } from './llm-service';
+import { Tool, Context, AssistantMessage, getToolCalls } from './llm-service';
 
 /**
  * 方法一：工具调用辅助结构化输出
  * 定义一个不执行任何操作的"假工具"，利用参数 schema 约束输出。
  */
-function createOutputSchema<T>(name: string, description: string, schema: Record<string, unknown>): ToolDefinition {
+function createOutputSchema(name: string, description: string, schema: Record<string, unknown>): Tool {
   return {
     name,
     description,
@@ -20,7 +20,6 @@ function createOutputSchema<T>(name: string, description: string, schema: Record
   };
 }
 
-// 示例：文本摘要的结构化输出 schema
 const summarizeSchema = createOutputSchema(
   'output_summary',
   '将文本总结为结构化格式',
@@ -39,29 +38,29 @@ const summarizeSchema = createOutputSchema(
  * 通过 tool_choice 强制模型使用指定工具输出
  */
 async function getStructuredOutput<T>(
-  llm: { complete(messages: Message[], tools?: ToolDefinition[]): Promise<LLMResponse> },
-  messages: Message[],
-  schema: ToolDefinition
+  llm: { complete(context: Context): Promise<AssistantMessage> },
+  messages: Context['messages'],
+  schema: Tool,
 ): Promise<T> {
-  const response = await llm.complete(messages, [schema]);
+  const context: Context = { messages, tools: [schema] };
+  const message = await llm.complete(context);
 
-  if (response.toolCalls.length === 0) {
+  const toolCalls = getToolCalls(message);
+  if (toolCalls.length === 0) {
     throw new Error('LLM did not produce structured output');
   }
 
-  return response.toolCalls[0].arguments as T;
+  return toolCalls[0].arguments as T;
 }
 
 /**
  * 方法二：提示词控制 + JSON 解析（带容错）
  */
 function parseJsonResponse<T>(text: string): T | null {
-  // 尝试直接解析
   try {
     return JSON.parse(text);
   } catch {}
 
-  // 提取 ```json ``` 代码块
   const match = text.match(/```json\s*([\s\S]*?)\s*```/);
   if (match) {
     try {
@@ -69,7 +68,6 @@ function parseJsonResponse<T>(text: string): T | null {
     } catch {}
   }
 
-  // 提取第一个 { ... } 块
   const braceMatch = text.match(/\{[\s\S]*\}/);
   if (braceMatch) {
     try {
