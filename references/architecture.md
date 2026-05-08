@@ -25,7 +25,7 @@ Agent 后端由四个相互协作的模块构成：
 - **工具系统**：定义工具能力、管理调度流程、控制权限审批、裁剪输出结果
 - **Agent 形态**：Agent 的执行形态（单体/多体/协同）与运行环境（交互式/定时任务/后台常驻）
 
-四个模块通过**执行引擎**串联：
+四个模块通过**执行循环**（agent loop）串联：
 
 ```mermaid
 flowchart LR
@@ -44,25 +44,25 @@ flowchart LR
     end
 
     subgraph toolMod [工具系统]
-        TM[ToolManager]
+        TS[ToolScheduler]
         Tools[具体工具]
-        Tools --> TM
+        Tools --> TS
     end
 
-    subgraph eng [执行引擎]
-        Engine[ExecutionEngine]
+    subgraph eng [执行循环]
+        Loop["runAgentLoop()"]
     end
 
-    CM -->|"Context"| Engine
-    TM -->|"tool definitions"| Engine
-    Engine -->|"completeSimple()"| LLM
-    LLM -->|"tool_calls"| Engine
-    Engine -->|"execute()"| TM
-    TM -->|"result"| Engine
-    Engine -->|"append result"| CM
+    CM -->|"Context"| Loop
+    TS -->|"tool definitions"| Loop
+    Loop -->|"streamSimple()"| LLM
+    LLM -->|"tool_calls"| Loop
+    Loop -->|"execute()"| TS
+    TS -->|"result"| Loop
+    Loop -->|"append result"| CM
 ```
 
-执行引擎的核心循环：LLM 输出 → 解析 tool_calls → 工具调度执行 → 结果回填上下文 → 循环直到 LLM 返回纯文本或达到最大迭代次数。
+执行循环采用纯函数设计（`runAgentLoop`），通过双层 while 循环实现完整编排：LLM 流式输出 → 解析 tool_calls → 工具调度执行 → 结果回填上下文 → 循环直到 LLM 不再产生工具调用。通过事件回调（emit）通知外部所有生命周期事件。
 
 ## 二、V0 Demo 版——完整骨架
 
@@ -93,7 +93,7 @@ src/
         system_prompt # SystemPromptContext（分段式系统提示词）
         conversation  # ConversationContext（极简会话历史）
     engine/
-      engine          # ExecutionEngine（基础循环）
+      agent-loop      # runAgentLoop（函数式双层循环）
   agent               # Agent 入口，组装所有模块
   prompts/
     system            # 默认系统提示词
@@ -129,38 +129,38 @@ V0 的工具只需核心字段：name、description、parameters（JSON Schema�
                         +------组装为--------+
                                   |
                                   v
-                    Context { systemPrompt, messages, tools } -> LLM.completeSimple()
+                    Context { systemPrompt, messages, tools } -> LLM.streamSimple()
 ```
 
 ContextManager 直接持有 Context 对象，`appendMessage()` 操作 messages，`getContext()` 刷新 systemPrompt 后返回引用。类型体系的核心设计是 Message 判别联合——每种角色（user/assistant/toolResult）只有自己需要的字段。
 
 详见 `references/context/mgmt-context-architecture.md`，参考代码 `examples/context-manager.ts`
 
-### 执行引擎
+### 执行循环
 
-核心循环（伪代码）：
+核心循环采用纯函数 `runAgentLoop` 实现，双层 while 结构（伪代码）：
 
 ```
-for i in range(max_iterations):
-    assistantMsg = llm.completeSimple(context)
-
-    if no tool_calls:
-        return assistantMsg
-
-    append assistant message to context
-    for each tool_call:
-        result = tool_manager.execute(tool_call.name, tool_call.args)
-        append tool result to context
-
-if reached max_iterations:
-    force final response without tools
+runAgentLoop(context, llm, config, emit, signal):
+  外层 while(true):                    # follow-up 层
+    内层 while(hasToolCalls || pending):  # tool calls + steering 层
+      streamAssistantResponse(context, llm)
+      if has tool_calls:
+        executeToolCalls(scheduler, toolCalls)
+        append results to context
+      check shouldStopAfterTurn
+      poll steering messages
+    check follow-up messages
+  emit agent_end
 ```
+
+无 maxIterations 硬限制——循环到 agent 自己停止。安全阀通过 `shouldStopAfterTurn` 回调实现。通过事件系统（AgentEvent）通知外部所有生命周期事件，支持 AbortSignal 中途取消。
 
 详见 `references/agent-runtime/agent-patterns.md`，参考代码 `examples/agent-loop.ts`
 
 ### Agent 入口
 
-组装所有模块，暴露 `run(user_input) -> response` 方法：构造 UserMessage → ContextManager.getContext() 获取 Context → 附加 tools → ExecutionEngine 循环调用 LLM → 返回最终回复。
+极简入口类，只做三件事：组装模块引用、提供 `run(userText)` 方法、提供 `abort()` 取消。run 流程：构造 UserMessage → ContextManager.appendMessage() → getContext() 获取 Context → 附加 tools → runAgentLoop 循环 → 返回最终回复。
 
 ## 三、V1 基础版——生产可用骨架
 
@@ -172,7 +172,7 @@ if reached max_iterations:
 
 **触发信号**：Agent 需要调用 Bash 或文件写入工具，你意识到需要权限控制和输出管理。
 
-新增 ToolScheduler（工具调用生命周期管理）、OutputTruncator（两层裁剪）、ApprovalStore（异步审批等待）。ExecutionEngine 改为通过 ToolScheduler 调度。
+新增 ToolScheduler（工具调用生命周期管理）、OutputTruncator（两层裁剪）、ApprovalStore（异步审批等待）。执行循环通过 ToolScheduler 调度工具，支持 parallel/sequential 两种执行模式。
 
 详见 `references/tools/tool-scheduling.md`
 

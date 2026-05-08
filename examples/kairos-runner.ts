@@ -14,7 +14,6 @@ import {
 } from './llm-service';
 import { ToolScheduler } from './tool-scheduler';
 import { ToolRegistry } from './tool-definition';
-import { ExecutionEngine } from './agent-loop';
 
 // ─── 消息类型 ───
 
@@ -151,7 +150,6 @@ class KairosRunner {
   private llm: BaseLLMService;
   private toolRegistry: ToolRegistry;
   private scheduler: ToolScheduler;
-  private engine: ExecutionEngine;
   private config: KairosConfig;
   private recentHistory: Message[] = [];
 
@@ -165,7 +163,6 @@ class KairosRunner {
     this.toolRegistry = options.toolRegistry;
     this.scheduler = options.scheduler;
     this.config = { ...DEFAULT_KAIROS_CONFIG, ...options.config };
-    this.engine = new ExecutionEngine({ scheduler: this.scheduler });
 
     this.registerSleepTool();
   }
@@ -209,7 +206,7 @@ class KairosRunner {
       tools: this.toolRegistry.getAll().map(t => ({
         name: t.name,
         description: t.description,
-        parameters: t.parameters,
+        parameters: t.parameters as unknown as Record<string, unknown>,
       })),
     };
   }
@@ -244,13 +241,19 @@ class KairosRunner {
   }
 
   private registerSleepTool() {
-    this.scheduler.registerHandler('Sleep', async (_id, _name, args) => {
-      const { seconds } = args as { seconds: number };
-      const clamped = Math.max(
-        this.config.minSleepSeconds,
-        Math.min(seconds, this.config.maxSleepSeconds),
-      );
-      return { resultString: `Sleeping for ${clamped} seconds` };
+    this.scheduler.registerTool({
+      name: SLEEP_TOOL_DEFINITION.name,
+      description: SLEEP_TOOL_DEFINITION.description,
+      parameters: SLEEP_TOOL_DEFINITION.parameters,
+      isReadOnly: true,
+      handler: async (args) => {
+        const { seconds } = args as { seconds: number };
+        const clamped = Math.max(
+          this.config.minSleepSeconds,
+          Math.min(seconds, this.config.maxSleepSeconds),
+        );
+        return { success: true, data: `Sleeping for ${clamped} seconds` };
+      },
     });
   }
 }

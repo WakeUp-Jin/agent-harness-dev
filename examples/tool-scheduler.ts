@@ -25,6 +25,12 @@ interface ToolCallRecord {
   durationMs?: number;
 }
 
+export interface ToolExecuteResult {
+  success: boolean;
+  resultString: string;
+  error?: string;
+}
+
 type ApprovalMode = 'default' | 'yolo';
 type SummarizeFn = (text: string) => Promise<string>;
 
@@ -46,11 +52,11 @@ export class ToolScheduler {
     this.maxOutputChars = options.maxOutputChars ?? 2000;
   }
 
-  async execute(callId: string, toolName: string, args: Record<string, unknown>): Promise<{
-    success: boolean;
-    resultString: string;
-    error?: string;
-  }> {
+  registerTool(tool: InternalTool): void {
+    this.tools.set(tool.name, tool);
+  }
+
+  async execute(callId: string, toolName: string, args: Record<string, unknown>): Promise<ToolExecuteResult> {
     const record: ToolCallRecord = {
       callId,
       toolName,
@@ -120,5 +126,30 @@ export class ToolScheduler {
       resultString,
       error: toolResult.error ?? undefined,
     };
+  }
+
+  async executeBatch(
+    calls: Array<{ callId: string; toolName: string; args: Record<string, unknown> }>,
+    mode: 'sequential' | 'parallel' = 'sequential',
+  ): Promise<Array<{ callId: string; toolName: string; result: ToolExecuteResult }>> {
+    if (mode === 'parallel') {
+      return Promise.all(
+        calls.map(async (c) => ({
+          callId: c.callId,
+          toolName: c.toolName,
+          result: await this.execute(c.callId, c.toolName, c.args),
+        })),
+      );
+    }
+
+    const results: Array<{ callId: string; toolName: string; result: ToolExecuteResult }> = [];
+    for (const c of calls) {
+      results.push({
+        callId: c.callId,
+        toolName: c.toolName,
+        result: await this.execute(c.callId, c.toolName, c.args),
+      });
+    }
+    return results;
   }
 }

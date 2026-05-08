@@ -57,6 +57,14 @@ export function toOpenAIFunction(tool: InternalTool) {
 export class ToolRegistry {
   private tools = new Map<string, InternalTool>();
 
+  static from(tools: InternalTool[]): ToolRegistry {
+    const registry = new ToolRegistry();
+    for (const tool of tools) {
+      registry.register(tool);
+    }
+    return registry;
+  }
+
   register(tool: InternalTool) {
     this.tools.set(tool.name, tool);
   }
