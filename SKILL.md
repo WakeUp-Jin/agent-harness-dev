@@ -1,5 +1,5 @@
 ---
-name: llm-agent-dev
+name: agent-harness-dev
 description: 指导开发基于大模型的 Agent 后端应用。当用户需要设计 Agent 架构、实现工具系统（Bash/Grep/Glob/文件操作）、构建上下文管理管道、开发 LLM 服务层、实现 Agent 执行循环、设计上下文压缩策略、开发结构化输出、集成 Skill/MCP 系统、或实现定时任务与自主 Agent 时使用此 Skill。即使用户只是提到"写一个 Agent"、"LLM 应用"、"工具调度"、"上下文管理"等关键词，也应主动触发。
 ---
 
