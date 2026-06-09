@@ -84,14 +84,30 @@ SKILL.md           →  架构总览 + 模块路由（始终加载）
 
 | 模块 | 覆盖内容 | 参考文档 |
 | --- | --- | --- |
-| **架构设计** | V0/V1 构建路径、目录结构、模块组装 | [`architecture.md`](references/architecture.md) |
-| **上下文管理** | 上下文管道、压缩策略、记忆、结构化输出 | [`context/`](references/context) |
-| **工具系统** | 工具定义、调度编排、权限审批、输出裁剪 | [`tools/`](references/tools) |
-| **LLM 模块** | 多模型服务层、工厂模式、模型分级 | [`llm/`](references/llm) |
-| **Agent 运行空间** | 执行循环、Agent 形态、定时任务、KAIROS | [`agent-runtime/`](references/agent-runtime) |
-| **评估体系** | 评估框架、多类型评估策略、评分实现 | [`agent-evaluation/`](references/agent-evaluation) |
-| **基础设施** | RAG 检索策略、Skill 集成 | [`foundations/`](references/foundations) |
-| **工程实践** | 常见陷阱、上下文污染、Skill 构建经验 | [`practices/`](references/practices) |
+| **架构设计** | V0/V1 构建路径、目录结构、模块组装 | [`architecture.md`](skills/agent-harness-dev/references/architecture.md) |
+| **上下文管理** | 上下文管道、压缩策略、记忆、结构化输出 | [`context/`](skills/agent-harness-dev/references/context) |
+| **工具系统** | 工具定义、调度编排、权限审批、输出裁剪 | [`tools/`](skills/agent-harness-dev/references/tools) |
+| **LLM 模块** | 多模型服务层、工厂模式、模型分级 | [`llm/`](skills/agent-harness-dev/references/llm) |
+| **Agent 运行空间** | 执行循环、Agent 形态、定时任务、KAIROS | [`agent-runtime/`](skills/agent-harness-dev/references/agent-runtime) |
+| **评估体系** | 评估框架、多类型评估策略、评分实现 | [`agent-evaluation/`](skills/agent-harness-dev/references/agent-evaluation) |
+| **基础设施** | RAG 检索策略、Skill 集成 | [`foundations/`](skills/agent-harness-dev/references/foundations) |
+| **工程实践** | 常见陷阱、上下文污染、Skill 构建经验 | [`practices/`](skills/agent-harness-dev/references/practices) |
+
+## 仓库结构
+
+```
+.
+├── README.md                  # 仓库说明（仅 GitHub 展示，不随 Skill 安装）
+├── public/                    # README 配图与动图（同上，不安装）
+└── skills/
+    └── agent-harness-dev/     # Skill 本体——npx skills add 只安装这里
+        ├── SKILL.md           # 入口：架构总览 + 模块路由
+        ├── references/        # 各模块详细规范（按需加载）
+        ├── examples/          # TypeScript 代码骨架
+        └── assets/            # 规范中引用的架构图
+```
+
+> 把 README 展示资源放在仓库根目录、Skill 本体放在 `skills/` 子目录，安装时只会拉取 Skill 内容，不会把 `public/` 的图一起装进编程助手。
 
 ## 兼容性
 
