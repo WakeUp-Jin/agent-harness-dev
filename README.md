@@ -124,6 +124,11 @@ SKILL.md           →  架构总览 + 模块路由（始终加载）
 
 提交 PR 前请阅读 [CONVENTIONS.md](CONVENTIONS.md)。核心约束：目录最多两层、文档通过路径引用代码、单个 reference 控制在 100–200 行、用祈使句解释"为什么"而非堆砌规则。
 
+## 参考与致谢
+
+- [上下文工程与运行空间实践指南](https://github.com/WakeUp-Jin/Practical-Guide-to-Context-Engineering) — 从上下文工程到 Harness Engineering 的系统化方法论，本项目的理论参考。
+- [Linux.Do 社区](https://linux.do/latest) (真诚 、友善 、团结 、专业)
+
 ## 许可证
 
 MIT · 作者 [@WakeUp-Jin](https://github.com/WakeUp-Jin)
