@@ -1,15 +1,25 @@
 /**
- * LLM 类型系统与服务基类
+ * LLM 类型系统与服务层的两种实现模式
  *
  * 类型层次：Context > Message > Content
  * - Context：LLM 调用的完整输入（systemPrompt + messages + tools）
  * - Message：判别联合（UserMessage | AssistantMessage | ToolResultMessage）
  * - Content：内容片段判别联合（TextContent | ThinkingContent | ImageContent | ToolCallContent）
  *
- * BaseLLMService 采用 stream-first 设计：
+ * 服务层有两条实现路径，按项目规模选择（详见 references/llm/llm-service.md）：
+ *
+ * 路径 A（默认推荐）：LLMService interface + 具体实现
+ * - 适用：<= 3 个 OpenAI 兼容 provider（DeepSeek、Kimi、Qwen、Groq 等）
+ * - 公共逻辑（消息转换、错误映射）提取为共享工具函数，不放基类
+ * - 完整实现见 examples/llm-openai-sdk-service.ts
+ *
+ * 路径 B（可选）：BaseLLMService 抽象基类
+ * - 适用：> 3 个 provider 或跨 API 协议（OpenAI + Anthropic + Google）
  * - 子类实现 _doStream（流式补全，接收已转换的 APIMessage[]）
  * - 基类提供 stream / complete / streamSimple / completeSimple 四个公开方法
  * - convertMessages 将内部 Message[] 转为 OpenAI 兼容格式，子类可重写
+ *
+ * 两条路径共同的铁律：complete() 永远是 stream().result() 的语法糖。
  */
 
 // ─── Content Types（内容类型判别联合） ───
@@ -254,12 +264,17 @@ export type APIMessage =
 
 // ─── 流式事件 ───
 
+/**
+ * 「错误在流中」原则：error 事件携带的是完整的 AssistantMessage
+ * （stopReason: "error" | "aborted" + errorMessage + 已收到的部分内容），
+ * 而不是裸 Error 对象。即使出错，消费方也能拿到部分文本 / 部分 tool calls。
+ */
 export type AssistantMessageEvent =
   | { type: "text_delta"; delta: string }
   | { type: "thinking_delta"; delta: string }
   | { type: "tool_call_delta"; index: number; delta: string }
   | { type: "done"; message: AssistantMessage }
-  | { type: "error"; error: Error };
+  | { type: "error"; message: AssistantMessage };
 
 export class AssistantMessageEventStream {
   constructor(private source: AsyncIterable<AssistantMessageEvent>) {}
@@ -268,15 +283,16 @@ export class AssistantMessageEventStream {
     yield* this.source;
   }
 
-  /** 消费整个流，返回最终的 AssistantMessage */
+  /**
+   * 消费整个流，返回最终的 AssistantMessage。
+   * 不 throw——错误以 stopReason === "error" | "aborted" 的 AssistantMessage 返回，
+   * 消费方用 switch-case 处理 stopReason，不需要 try-catch。
+   */
   async result(): Promise<AssistantMessage> {
     let finalMessage: AssistantMessage | undefined;
     for await (const event of this.source) {
-      if (event.type === 'done') {
+      if (event.type === 'done' || event.type === 'error') {
         finalMessage = event.message;
-      }
-      if (event.type === 'error') {
-        throw event.error;
       }
     }
     if (!finalMessage) throw new Error('Stream ended without producing a message');
@@ -284,9 +300,31 @@ export class AssistantMessageEventStream {
   }
 }
 
-// ─── BaseLLMService ───
+// ─── 路径 A：LLMService Interface（默认推荐） ───
 
-export abstract class BaseLLMService {
+/**
+ * 当所有 provider 都是 OpenAI 兼容时，用 interface + 具体实现替代抽象基类：
+ * - 消费方只依赖行为契约，不耦合到具体类
+ * - 消息转换 / 错误映射等公共逻辑提取为共享工具函数（如 llm/convert.ts）
+ * - 每个 service 的 complete() 复用 stream().result()，不需要基类提供
+ *
+ * 具体实现示例见 examples/llm-openai-sdk-service.ts。
+ */
+export interface LLMService {
+  stream(context: Context, options?: StreamOptions): AssistantMessageEventStream;
+  complete(context: Context, options?: StreamOptions): Promise<AssistantMessage>;
+  streamSimple(context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream;
+  completeSimple(context: Context, options?: SimpleStreamOptions): Promise<AssistantMessage>;
+}
+
+// ─── 路径 B：BaseLLMService（可选，多 API 协议场景） ───
+
+/**
+ * 仅当需要同时支持多种 API 格式（OpenAI + Anthropic + Google）时才引入。
+ * 如果所有 provider 都是 OpenAI 兼容的，抽象基类只会变成纯粹的间接层，
+ * 应使用上面的 LLMService interface。
+ */
+export abstract class BaseLLMService implements LLMService {
   protected config: LLMConfig;
 
   constructor(config: LLMConfig) {

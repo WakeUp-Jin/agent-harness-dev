@@ -1,13 +1,19 @@
 /**
  * Bash 工具示例
- * 展示 definition + executor + 多层安全检查的完整实现模式。
+ * 展示 definition + executor + 多层安全检查 + 大输出流式落盘的完整实现模式。
+ *
+ * 输出处理核心原则（详见 references/tools/bash-tool.md「输出处理与内存安全」）：
+ * - bash 输出大小不可控，绝不能在内存里累加全量字符串（maxBuffer 模式是反面教材）
+ * - 边执行边流式写盘，内存只保留有界头部缓冲（headBufferCap）
+ * - 小输出（≤ headBufferCap）根本不落盘，零文件残留
+ * - 大输出回填给模型：逐字头部 + 截断标记 + 文件路径，模型可用 read_file 翻页读全文
+ * - bash 不走 LLM 摘要——全量已落盘、逐字头部比摘要更可信、省延迟成本
  */
 
 import { InternalTool, ToolResult, PermissionResult } from './tool-definition';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
-
-const execFileAsync = promisify(execFile);
+import { runProcess } from './run-process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // ── 安全检查常量 ──
 
@@ -56,34 +62,88 @@ async function bashCheckPermissions(args: Record<string, unknown>): Promise<Perm
 
 // ── 执行器 ──
 
+/** 内存头部缓冲上限：执行期内存占用恒定 ≈ 这个值，与输出总量无关 */
+const HEAD_BUFFER_CAP = 4000;
+/** 磁盘安全阀：防跑飞命令撑爆磁盘，远大于内存阈值 */
+const DISK_CAP = 5 * 1024 * 1024;
+
+/**
+ * 落盘位置在应用数据目录的临时区，不污染 workspace。
+ * 实际项目中用 <userData>/tmp/tool-output/<sessionId>/<turnId>-<toolCallId>-bash.txt，
+ * 并由定时清理任务回收。注意：read_file 等读取工具的路径边界不能被 workspace
+ * 硬框死，否则模型无法读回该路径。
+ */
+function buildOutputFilePath(toolCallId: string): string {
+  return join(tmpdir(), 'tool-output', `${toolCallId}-bash.txt`);
+}
+
+interface BashResultData {
+  /** 前 HEAD_BUFFER_CAP 字符（小输出时即全部内容） */
+  headBuffer: string;
+  /** 实际输出总字节数 */
+  totalBytes: number;
+  /** 仅当输出溢出头部缓冲、实际落盘时才有值 */
+  outputFilePath?: string;
+  /** 命中 diskCap，落盘文件本身也不完整 */
+  diskTruncated: boolean;
+  exitCode: number | null;
+}
+
 async function bashHandler(args: Record<string, unknown>): Promise<ToolResult> {
   const command = args.command as string;
   const timeout = (args.timeout as number) ?? 120000;
+  const toolCallId = (args.toolCallId as string) ?? `${Date.now()}`;
 
-  try {
-    const { stdout, stderr } = await execFileAsync('bash', ['-c', command], {
-      timeout,
-      maxBuffer: 1024 * 1024,
-    });
-    return { success: true, data: { stdout, stderr, exitCode: 0 } };
-  } catch (err: any) {
-    if (err.killed) {
-      return { success: false, error: `命令超时（${timeout}ms）` };
-    }
-    return {
-      success: true, // 非零退出码也算"执行成功"
-      data: { stdout: err.stdout ?? '', stderr: err.stderr ?? '', exitCode: err.code ?? 1 },
-    };
+  // 不用 execFileAsync + maxBuffer：全量输出累加进内存，输出一大就报错或吃光内存。
+  // runProcess 的 sink 模式：内存只保留 headBuffer，超出部分懒创建临时文件流式写盘。
+  const result = await runProcess('bash', ['-c', command], {
+    cwd: process.cwd(),
+    timeoutMs: timeout,
+    sink: {
+      outputFile: buildOutputFilePath(toolCallId),
+      headBufferCap: HEAD_BUFFER_CAP,
+      diskCap: DISK_CAP,
+    },
+  });
+
+  if (result.startError) {
+    return { success: false, error: `无法启动 bash: ${result.startError}` };
   }
+  if (result.timedOut) {
+    return { success: false, error: `命令超时（${timeout}ms）` };
+  }
+
+  const data: BashResultData = {
+    headBuffer: result.headBuffer,
+    totalBytes: result.totalBytes,
+    outputFilePath: result.outputFilePath,
+    diskTruncated: result.truncated,
+    exitCode: result.exitCode,
+  };
+  // 非零退出码也算"执行成功"——退出码本身是模型需要的信息
+  return { success: true, data };
 }
 
+/**
+ * 回填给模型的内容按是否落盘分两种形态：
+ * - 未落盘（输出 ≤ headBufferCap）：inline 全部内容，无截断标记
+ * - 已落盘：逐字头部 + 截断标记 + 文件路径。截断标记是硬要求——
+ *   必须让模型知道内容不完整以及如何取完整原文，避免误把截断结果当全量
+ */
 function renderBashResult(result: ToolResult): string {
   if (!result.success) return `Error: ${result.error}`;
-  const { stdout, stderr, exitCode } = result.data as any;
-  let output = '';
-  if (stdout) output += stdout;
-  if (stderr) output += `\n[stderr]\n${stderr}`;
-  output += `\n[exit code: ${exitCode}]`;
+  const data = result.data as BashResultData;
+
+  let output = data.headBuffer;
+
+  if (data.outputFilePath) {
+    const note = data.diskTruncated
+      ? `完整原文超过磁盘上限，文件仅保留前 ${DISK_CAP} 字节`
+      : `完整原文见 ${data.outputFilePath}，可用 read_file 读取`;
+    output += `\n[输出截断：显示前 ${data.headBuffer.length}/共 ${data.totalBytes} 字符，${note}]`;
+  }
+
+  output += `\n[exit code: ${data.exitCode}]`;
   return output.trim();
 }
 

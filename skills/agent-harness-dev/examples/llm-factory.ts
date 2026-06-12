@@ -1,18 +1,23 @@
 /**
  * LLM 工厂函数示例
  * 根据配置创建对应的 LLM 服务实例，对上层屏蔽供应商差异。
+ *
+ * 注册表的值类型是 LLMService interface——消费方只依赖行为契约，
+ * 不耦合到 BaseLLMService 抽象类（interface 实现和 abstract class 子类都能注册）。
+ * provider 少（<= 3 个）时不需要注册表，工厂内一个 switch 即可，
+ * 见 examples/llm-openai-sdk-service.ts 末尾的 createLLMService。
  */
 
-import { LLMConfig, BaseLLMService } from './llm-service';
+import { LLMConfig, LLMService } from './llm-service';
 
 // Provider -> 服务类的映射注册表
-const PROVIDERS: Record<string, new (config: LLMConfig) => BaseLLMService> = {};
+const PROVIDERS: Record<string, new (config: LLMConfig) => LLMService> = {};
 
-export function registerProvider(name: string, cls: new (config: LLMConfig) => BaseLLMService) {
+export function registerProvider(name: string, cls: new (config: LLMConfig) => LLMService) {
   PROVIDERS[name] = cls;
 }
 
-export function createLLMService(config: LLMConfig): BaseLLMService {
+export function createLLMService(config: LLMConfig): LLMService {
   const resolvedConfig: LLMConfig = {
     ...config,
     apiKey: resolveApiKey(config),

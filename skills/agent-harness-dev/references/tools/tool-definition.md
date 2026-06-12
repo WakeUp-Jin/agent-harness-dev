@@ -9,6 +9,41 @@
 
 这种分离使得工具定义可以独立管理、动态注册，executor 可以独立测试和替换。
 
+## 推荐文件组织：每个工具一个文件夹
+
+文件组织要与分离理念一致——**每个工具一个文件夹**，definition 和 executor 各一个文件，而不是合在单文件里：
+
+```
+tool/
+  types.ts                  # InternalTool, ToolResult, PermissionResult
+  manager.ts                # ToolManager（注册/查询/执行）
+  scheduler.ts              # ToolScheduler（V1 生命周期管理）
+  output-truncator.ts       # OutputTruncator（V1 输出裁剪）
+  shared/                   # 多工具共享的基础设施
+    run-process.ts          # 通用受控子进程 runner
+    rg-runner.ts            # rg 命令适配层
+    write-atomic.ts         # 原子写入
+    file-read-tracker.ts    # TOCTOU 防护
+  tools/
+    read-file/
+      definition.ts         # name, description, parameters, isReadOnly, category
+      executor.ts           # handler 函数实现
+    bash/
+      definition.ts
+      executor.ts
+      permissions.ts        # 复杂的权限检查可独立成文件
+    edit-file/
+      definition.ts
+      executor.ts
+      permissions.ts
+```
+
+理由：
+- definition 可以被 LLM tool list 消费而不加载 executor 及其依赖
+- executor 可以独立单元测试
+- 工具数量增多时不会出现 definition 和 executor 逻辑混在一起的大文件
+- 多个工具共享的逻辑（子进程执行、原子写入）放 `shared/`，不要在各工具里复制
+
 ## 工具类型结构（InternalTool）
 
 一个完整的工具定义包含以下字段：

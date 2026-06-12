@@ -11,7 +11,7 @@
  */
 
 import {
-  BaseLLMService, Context, Message, UserMessage,
+  LLMService, Context, Message, UserMessage,
   AssistantMessage, ToolResultMessage, ToolCallContent,
   Usage, Tool, TextContent,
   MessagePriority, AssistantMessageEvent,
@@ -72,7 +72,7 @@ export interface AgentLoopResult {
  */
 export async function runAgentLoop(
   context: Context,
-  llm: BaseLLMService,
+  llm: LLMService,
   config: AgentLoopConfig,
   emit: AgentEventSink,
   signal?: AbortSignal,
@@ -111,7 +111,7 @@ async function runLoop(
   context: Context,
   newMessages: Message[],
   totalUsage: Usage,
-  llm: BaseLLMService,
+  llm: LLMService,
   config: AgentLoopConfig,
   emit: AgentEventSink,
   signal?: AbortSignal,
@@ -195,56 +195,48 @@ async function runLoop(
 /**
  * 调用 LLM 并消费流式响应。
  * 通过 message_delta 事件转发流式增量，通过 message_end 提交最终消息。
- * LLM 错误不会抛出，而是返回 stopReason='error' 的 AssistantMessage。
+ *
+ * 「错误在流中」：service 层不 throw，error 事件携带的就是
+ * stopReason='error'|'aborted' 的 AssistantMessage（含已收到的部分内容），
+ * 所以这里只需要 switch-case，不需要 try-catch 和手动构造空错误消息。
  */
 async function streamAssistantResponse(
   context: Context,
-  llm: BaseLLMService,
+  llm: LLMService,
   signal: AbortSignal | undefined,
   emit: AgentEventSink,
 ): Promise<AssistantMessage> {
-  try {
-    const stream = llm.streamSimple(context, { signal });
+  const stream = llm.streamSimple(context, { signal });
 
-    for await (const event of stream) {
-      switch (event.type) {
-        case 'text_delta':
-        case 'thinking_delta':
-        case 'tool_call_delta':
-          await emit({ type: 'message_delta', delta: event });
-          break;
+  for await (const event of stream) {
+    switch (event.type) {
+      case 'text_delta':
+      case 'thinking_delta':
+      case 'tool_call_delta':
+        await emit({ type: 'message_delta', delta: event });
+        break;
 
-        case 'done': {
-          const msg = event.message;
-          if (hasToolCalls(msg)) {
-            msg.priority ??= MessagePriority.HIGH;
-          }
-          context.messages.push(msg);
-          await emit({ type: 'message_end', message: msg });
-          return msg;
+      case 'done': {
+        const msg = event.message;
+        if (hasToolCalls(msg)) {
+          msg.priority ??= MessagePriority.HIGH;
         }
+        context.messages.push(msg);
+        await emit({ type: 'message_end', message: msg });
+        return msg;
+      }
 
-        case 'error':
-          throw event.error;
+      case 'error': {
+        // error 事件携带完整 AssistantMessage——部分内容不丢失
+        const msg = event.message;
+        context.messages.push(msg);
+        await emit({ type: 'message_end', message: msg });
+        return msg;
       }
     }
-
-    throw new Error('Stream ended without producing a message');
-  } catch (err) {
-    const errorMsg: AssistantMessage = {
-      role: 'assistant',
-      content: [{ type: 'text', text: '' }],
-      model: 'unknown',
-      provider: 'unknown',
-      usage: createEmptyUsage(),
-      stopReason: signal?.aborted ? 'aborted' : 'error',
-      errorMessage: err instanceof Error ? err.message : String(err),
-      timestamp: Date.now(),
-    };
-    context.messages.push(errorMsg);
-    await emit({ type: 'message_end', message: errorMsg });
-    return errorMsg;
   }
+
+  throw new Error('Stream ended without producing a message');
 }
 
 // ─── 工具调用执行 ───
@@ -312,7 +304,7 @@ async function executeToolCalls(
  * 消息队列通过构造选项的回调传入，需要队列功能时调用者自行管理。
  */
 export class Agent {
-  private llm: BaseLLMService;
+  private llm: LLMService;
   private contextManager: ContextManager;
   private toolRegistry: ToolRegistry;
   private scheduler: ToolScheduler;
@@ -324,7 +316,7 @@ export class Agent {
   private getFollowUpMessages?: AgentLoopConfig['getFollowUpMessages'];
 
   constructor(options: {
-    llm: BaseLLMService;
+    llm: LLMService;
     contextManager: ContextManager;
     toolRegistry: ToolRegistry;
     scheduler: ToolScheduler;
@@ -405,7 +397,7 @@ export interface SubAgentDefinition {
  * 在隔离的上下文中执行 runAgentLoop，返回结构化结果。
  */
 export function createSubAgentTool(options: {
-  llm: BaseLLMService;
+  llm: LLMService;
   scheduler: ToolScheduler;
   toolRegistry: ToolRegistry;
   subAgentDefs?: SubAgentDefinition[];

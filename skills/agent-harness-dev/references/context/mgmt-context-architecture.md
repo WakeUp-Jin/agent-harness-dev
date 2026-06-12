@@ -62,6 +62,25 @@ LLM 调用的完整输入，包含三个部分：
 
 模块之间不直接依赖，通过 ContextManager 协调。新增模块（如 RAG 模块、相关文档模块）只需实现 `format()` 接口即可接入。
 
+## 推荐目录结构
+
+编排器（manager）和被编排的模块用 `modules/` 子目录分离，新增模块只需在 `modules/` 下加文件并实现 `ContextModule` 接口：
+
+```
+context/
+  types.ts                    # SystemPart, ContextParts, ContextModule, CompressionConfig
+  manager.ts                  # ContextManager 编排器
+  token-estimator.ts          # Token 估算工具函数（V1）
+  modules/                    # 各类上下文模块
+    system-prompt.ts          # SystemPromptContext（分段式系统提示词）
+    conversation.ts           # ConversationContext（V0 极简会话历史）
+    short-term-memory.ts      # ShortTermMemoryContext（V1 带持久化的会话历史，替换 conversation）
+    long-term-memory.ts       # LongTermMemoryContext（V1 用户画像/偏好）
+  index.ts                    # 统一导出
+```
+
+与 `references/architecture.md` 的 V0/V1 目录结构保持一致。
+
 ## 上下文组装流程
 
 ContextManager 直接持有 `context: Context` 对象。`appendMessage()` 直接操作 `context.messages`，`getContext()` 刷新 systemPrompt 后返回持有的 context 引用：
@@ -70,7 +89,7 @@ ContextManager 直接持有 `context: Context` 对象。`appendMessage()` 直接
 2. 所有 systemParts 通过 `render()` 渲染为 XML 标签文本，拼接为 context.systemPrompt
 3. 返回 context（messages 已在 appendMessage 时直接写入）
 
-调用方在 Context 上附加 tools 后传入 LLM 服务。BaseLLMService 内部通过 `convertMessages()` 将 Message[] 转为 OpenAI 兼容的 API 格式（丢弃 source/priority/timestamp 等内部元数据），然后交给子类的 `_doStream()` 执行流式补全。`complete()` / `completeSimple()` 等非流式方法是流式方法的 wrapper，直接返回 AssistantMessage。
+调用方在 Context 上附加 tools 后传入 LLM 服务。LLM 服务内部通过 `convertMessages()` 将 Message[] 转为 OpenAI 兼容的 API 格式（丢弃 source/priority/timestamp 等内部元数据），再执行流式补全。`complete()` / `completeSimple()` 等非流式方法是流式方法的 wrapper，直接返回 AssistantMessage。
 
 参考代码: `examples/context-manager.ts`、`examples/llm-service.ts`
 
@@ -79,5 +98,5 @@ ContextManager 直接持有 `context: Context` 对象。`appendMessage()` 直接
 - 模块之间不应直接依赖，通过 ContextManager 协调
 - 系统提示词的 segment 优先级设计很关键——当窗口紧张时，哪些身份信息可以丢弃、哪些必须保留
 - LLM 服务的 complete/completeSimple 直接返回 AssistantMessage（含 usage/stopReason），调用方直接 appendMessage 即可
-- BaseLLMService.convertMessages() 默认实现 OpenAI 兼容格式，子类可重写适配 Anthropic 等非兼容 provider
+- `convertMessages()` 默认实现 OpenAI 兼容格式转换；非 OpenAI 兼容 provider（如 Anthropic）需要各自的协议转换层，见 `references/llm/llm-service.md` 的「消息格式转换」
 - ThinkingContent 的 signature 字段在多轮对话中必须回传，否则部分 API 会返回 400 错误

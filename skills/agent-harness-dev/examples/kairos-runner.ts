@@ -8,7 +8,7 @@
  */
 
 import {
-  BaseLLMService, Context, Message,
+  LLMService, Context, Message,
   UserMessage, AssistantMessage,
   getTextContent,
 } from './llm-service';
@@ -147,14 +147,14 @@ const DEFAULT_KAIROS_CONFIG: KairosConfig = {
 const MAX_HISTORY_MESSAGES = 10;
 
 class KairosRunner {
-  private llm: BaseLLMService;
+  private llm: LLMService;
   private toolRegistry: ToolRegistry;
   private scheduler: ToolScheduler;
   private config: KairosConfig;
   private recentHistory: Message[] = [];
 
   constructor(options: {
-    llm: BaseLLMService;
+    llm: LLMService;
     toolRegistry: ToolRegistry;
     scheduler: ToolScheduler;
     config?: Partial<KairosConfig>;
