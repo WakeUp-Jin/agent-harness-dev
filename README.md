@@ -2,7 +2,7 @@
 
 # agent-harness-dev
 
-**一份教 AI 编程助手如何构建 Agent 后端的架构规范**
+**一份构建 Agent 后端的 Skill —— 从 Context Engineering 与 Harness Engineering 的设计理念整理而来**
 
 [安装](#安装) · [核心理念](#核心理念) · [架构](#架构) · [模块一览](#模块一览)
 
@@ -14,11 +14,15 @@
 
 ## 是什么
 
-`agent-harness-dev` **不是**框架，也不是 SDK，而是一份**可被 LLM 直接消费的架构规范**。
+`agent-harness-dev` 是一份**可被 LLM 直接消费的 [Skill](https://github.com/vercel-labs/skills)**——不是框架，也不是 SDK。
 
-以 [Skill](https://github.com/vercel-labs/skills) 形式装进你的 AI 编程助手（Cursor、Claude Code 等），它在帮你写 Agent 时会自动提供一套经过实战验证的架构参考——从第一个 `runAgentLoop` 原型，到含调度、压缩、权限的生产级系统。
+它把 **Context Engineering**（如何在有限窗口内选择、组织、注入最相关的信息）与 **Harness Engineering**（如何为 Agent 搭建稳定的运行空间）两套设计理念，整理成 AI 编程助手能直接执行的架构规范。装进 Cursor、Claude Code 后，它在帮你写 Agent 时自动提供经过实战验证的架构参考——从第一个 `runAgentLoop` 原型，到含调度、压缩、权限的生产级系统。
 
 > 上下文工程（Context Engineering）是设计原则，Agent Harness 是构建目标。
+
+## 理论参考
+
+本 Skill 整理自 [《上下文工程与运行空间实践指南》](https://github.com/WakeUp-Jin/Practical-Guide-to-Context-Engineering)——从上下文工程到 Harness Engineering 的系统化方法论。指南讲「为什么这样设计」，本 Skill 负责「让 AI 编程助手照着这样构建」。
 
 ## 安装
 
