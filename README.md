@@ -81,6 +81,9 @@ SKILL.md           →  架构总览 + 模块路由（始终加载）
 </table>
 
 ## 架构
+<div align="centre">
+<img src="public/agent-harness-dev.png"></img>
+</div>
 
 四个模块通过执行引擎串联：LLM 输出 → 解析 `tool_calls` → 工具调度执行 → 结果回填上下文 → 循环直到完成（即顶部动图）。
 
